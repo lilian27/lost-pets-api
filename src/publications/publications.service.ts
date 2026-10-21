@@ -8,6 +8,8 @@ import { InjectModel } from '@nestjs/mongoose';
 import { FilterQuery, Model } from 'mongoose';
 import { AuthUser } from '../common/auth.guard';
 import { PublicationStatus } from '../common/enums';
+import { isDuplicateKey } from '../common/mongo-errors';
+import { toPaging } from '../common/pagination.dto';
 import { PetDocument } from '../pets/pet.schema';
 import { PetsService } from '../pets/pets.service';
 import { UserDocument } from '../users/user.schema';
@@ -20,6 +22,7 @@ import { Publication, PublicationDocument } from './publication.schema';
 
 export const ACTIVE_PUBLICATION_EXISTS =
   'This pet already has an active publication';
+export const DEFAULT_PUBLICATIONS_PAGE_SIZE = 24;
 
 export type PopulatedPublication = Omit<
   PublicationDocument,
@@ -44,7 +47,6 @@ export class PublicationsService {
       const created = await this.publications.create({
         owner: ownerId,
         pet: pet.id,
-        species: pet.species,
         commune: dto.commune,
         description: dto.description,
         lastSeenAddress: dto.lastSeenAddress,
@@ -53,20 +55,24 @@ export class PublicationsService {
       });
       return this.populate(created);
     } catch (err) {
-      if ((err as { code?: number }).code === 11000) {
-        throw new ConflictException(ACTIVE_PUBLICATION_EXISTS);
-      }
-      throw err;
+      throw PublicationsService.mapDuplicate(err);
     }
   }
 
-  findActive(query: ListPublicationsQuery): Promise<PopulatedPublication[]> {
+  async findActive(
+    query: ListPublicationsQuery,
+  ): Promise<PopulatedPublication[]> {
     const filter: FilterQuery<Publication> = {
       status: PublicationStatus.ACTIVE,
     };
     if (query.commune) filter.commune = query.commune;
-    if (query.species) filter.species = query.species;
-    return this.findPopulated(filter);
+    if (query.species) {
+      filter.pet = { $in: await this.pets.idsBySpecies(query.species) };
+    }
+    return this.findPopulated(
+      filter,
+      toPaging(query, DEFAULT_PUBLICATIONS_PAGE_SIZE),
+    );
   }
 
   findMine(ownerId: string): Promise<PopulatedPublication[]> {
@@ -102,7 +108,11 @@ export class PublicationsService {
     }
     pub.status = status;
     pub.foundAt = status === PublicationStatus.FOUND ? new Date() : undefined;
-    await pub.save();
+    try {
+      await pub.save();
+    } catch (err) {
+      throw PublicationsService.mapDuplicate(err);
+    }
     return this.populate(pub);
   }
 
@@ -121,10 +131,19 @@ export class PublicationsService {
     ])) as unknown as PopulatedPublication;
   }
 
-  private async findPopulated(filter: FilterQuery<Publication>) {
-    const pubs = await this.publications
-      .find(filter)
-      .sort({ lostAt: -1 })
+  private static mapDuplicate(err: unknown): unknown {
+    return isDuplicateKey(err)
+      ? new ConflictException(ACTIVE_PUBLICATION_EXISTS)
+      : err;
+  }
+
+  private async findPopulated(
+    filter: FilterQuery<Publication>,
+    paging?: { skip: number; limit: number },
+  ) {
+    const q = this.publications.find(filter).sort({ lostAt: -1, _id: -1 });
+    if (paging) q.skip(paging.skip).limit(paging.limit);
+    const pubs = await q
       .populate<{ pet: PetDocument; owner: UserDocument }>(['pet', 'owner'])
       .exec();
     return pubs as unknown as PopulatedPublication[];

@@ -4,7 +4,8 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
+import { Model, Types } from 'mongoose';
+import { Species } from '../common/enums';
 import { CreatePetDto, UpdatePetDto } from './dto/pet.dto';
 import { Pet, PetDocument } from './pet.schema';
 
@@ -18,6 +19,10 @@ export class PetsService {
 
   findMine(ownerId: string): Promise<PetDocument[]> {
     return this.pets.find({ owner: ownerId }).sort({ createdAt: -1 }).exec();
+  }
+
+  idsBySpecies(species: Species): Promise<Types.ObjectId[]> {
+    return this.pets.find({ species }).distinct('_id').exec();
   }
 
   async findOwned(id: string, ownerId: string): Promise<PetDocument> {

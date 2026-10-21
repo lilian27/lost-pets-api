@@ -2,6 +2,12 @@ import { getModelToken } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { User } from '../src/users/user.schema';
 import { Publication } from '../src/publications/publication.schema';
+import { ACTIVE_PUBLICATION_EXISTS } from '../src/publications/publications.service';
+import {
+  POSSIBLE_FINDING_REQUIRES_ACCOUNT,
+  PUBLICATION_CLOSED,
+} from '../src/comments/comments.service';
+import { NotificationsService } from '../src/notifications/notifications.service';
 import {
   BIG_PNG,
   closeTestApp,
@@ -788,6 +794,308 @@ describe('Lost Pets API (integration)', () => {
         .set('Content-Type', 'application/json')
         .send(JSON.stringify({ alias: 'x'.repeat(6 * 1024 * 1024) }))
         .expect(413);
+    });
+  });
+
+  describe('review hardening', () => {
+    const anonAuthor = { authorName: 'Ana', authorEmail: 'ana@example.com' };
+    const uid = () =>
+      Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+
+    it('closes the thread once found and hides its comments from strangers', async () => {
+      const a = await register();
+      const c = await register();
+      const pet = await createPet(a.token);
+      const pub = await publish(a.token, pet.id);
+      const url = `/publications/${pub.id}/comments`;
+      const anon = await ctx
+        .http()
+        .post(url)
+        .send({ ...anonAuthor, text: 'seen' })
+        .expect(201);
+      const mine = await ctx
+        .http()
+        .post(url)
+        .set(auth(c.token))
+        .send({ text: 'mine' })
+        .expect(201);
+      await ctx
+        .http()
+        .patch(`/publications/${pub.id}/status`)
+        .set(auth(a.token))
+        .send({ status: 'found' })
+        .expect(200);
+
+      const closed = await ctx
+        .http()
+        .post(url)
+        .set(auth(a.token))
+        .send({ text: 'thanks' })
+        .expect(409);
+      expect(closed.body.message).toBe(PUBLICATION_CLOSED);
+      await ctx.http().post(`/comments/${anon.body.id}/flag`).expect(404);
+      await ctx
+        .http()
+        .post(`/comments/${anon.body.id}/flag`)
+        .set(auth(c.token))
+        .expect(404);
+      await ctx
+        .http()
+        .patch(`/comments/${anon.body.id}`)
+        .set('X-Edit-Token', anon.body.editToken)
+        .send({ text: 'edit' })
+        .expect(404);
+      await ctx
+        .http()
+        .patch(`/comments/${mine.body.id}`)
+        .set(auth(c.token))
+        .send({ text: 'edit' })
+        .expect(404);
+      await ctx
+        .http()
+        .post(`/comments/${mine.body.id}/flag`)
+        .set(auth(a.token))
+        .expect(200);
+    });
+
+    it('requires an account to report a possible finding', async () => {
+      const a = await register();
+      const pet = await createPet(a.token);
+      const pub = await publish(a.token, pet.id);
+      const res = await ctx
+        .http()
+        .post(`/publications/${pub.id}/comments`)
+        .send({ ...anonAuthor, text: 'I have him', type: 'possible_finding' })
+        .expect(403);
+      expect(res.body.message).toBe(POSSIBLE_FINDING_REQUIRES_ACCOUNT);
+    });
+
+    it('keeps the comment when notifying fails and notifies with the current alias', async () => {
+      const a = await register();
+      const c = await register();
+      const pet = await createPet(a.token);
+      const pub = await publish(a.token, pet.id);
+      const url = `/publications/${pub.id}/comments`;
+      const spy = jest
+        .spyOn(ctx.app.get(NotificationsService), 'create')
+        .mockRejectedValueOnce(new Error('notifications down'));
+      const saved = await ctx
+        .http()
+        .post(url)
+        .send({ ...anonAuthor, text: 'seen' })
+        .expect(201);
+      spy.mockRestore();
+      expect(saved.body.editToken).toHaveLength(48);
+      const thread = await ctx.http().get(url).expect(200);
+      expect(thread.body.map((x: { id: string }) => x.id)).toContain(
+        saved.body.id,
+      );
+
+      const alias = `ren${uid()}`;
+      await ctx
+        .http()
+        .patch('/users/me')
+        .set(auth(c.token))
+        .send({ alias })
+        .expect(200);
+      // c still uses the token issued with the old alias
+      await ctx
+        .http()
+        .post(url)
+        .set(auth(c.token))
+        .send({ text: 'maybe' })
+        .expect(201);
+      const list = await ctx
+        .http()
+        .get('/notifications')
+        .set(auth(a.token))
+        .expect(200);
+      expect(list.body).toHaveLength(1);
+      expect(list.body[0].message).toContain(alias);
+    });
+
+    it('counts concurrent offensive flags atomically', async () => {
+      const a = await register();
+      const c = await register();
+      const pet = await createPet(a.token);
+      const pub = await publish(a.token, pet.id);
+      const comment = await ctx
+        .http()
+        .post(`/publications/${pub.id}/comments`)
+        .set(auth(a.token))
+        .send({ text: 'hi' })
+        .expect(201);
+      const flag = (token?: string) => {
+        const req = ctx.http().post(`/comments/${comment.body.id}/flag`);
+        return token ? req.set(auth(token)) : req;
+      };
+      const results = await Promise.all([
+        flag(c.token),
+        flag(c.token),
+        flag(c.token),
+        flag(),
+        flag(),
+      ]);
+      expect(results.map((r) => r.status)).toEqual([200, 200, 200, 200, 200]);
+      const thread = await ctx
+        .http()
+        .get(`/publications/${pub.id}/comments`)
+        .set(auth(c.token))
+        .expect(200);
+      expect(thread.body[0]).toMatchObject({ flagCount: 3, flaggedByMe: true });
+    });
+
+    it('maps duplicate-key races on users to 409', async () => {
+      const model = ctx.app.get<Model<User>>(getModelToken(User.name));
+      const dup = (keyPattern: object) =>
+        Object.assign(new Error('dup'), { code: 11000, keyPattern });
+      const create = jest.spyOn(model, 'create');
+      create.mockRejectedValueOnce(dup({ alias: 1 }));
+      const r1 = await ctx
+        .http()
+        .post('/auth/register')
+        .send(newUser())
+        .expect(409);
+      expect(r1.body.message).toBe('Alias is already taken');
+      create.mockRejectedValueOnce(dup({ email: 1 }));
+      const r2 = await ctx
+        .http()
+        .post('/auth/register')
+        .send(newUser())
+        .expect(409);
+      expect(r2.body.message).toBe('Email is already registered');
+      create.mockRejectedValueOnce(new Error('boom'));
+      await ctx.http().post('/auth/register').send(newUser()).expect(500);
+      create.mockRestore();
+
+      const u = await register();
+      const save = jest
+        .spyOn(model.prototype, 'save')
+        .mockRejectedValueOnce(dup({ alias: 1 }));
+      await ctx
+        .http()
+        .patch('/users/me')
+        .set(auth(u.token))
+        .send({ alias: `x${uid()}` })
+        .expect(409);
+      save.mockRestore();
+    });
+
+    it('maps a concurrent reactivation to 409', async () => {
+      const a = await register();
+      const pet = await createPet(a.token);
+      const pub = await publish(a.token, pet.id);
+      const status = (s: string) =>
+        ctx
+          .http()
+          .patch(`/publications/${pub.id}/status`)
+          .set(auth(a.token))
+          .send({ status: s });
+      await status('found').expect(200);
+      const model = ctx.app.get<Model<Publication>>(
+        getModelToken(Publication.name),
+      );
+      const save = jest.spyOn(model.prototype, 'save');
+      save.mockRejectedValueOnce(
+        Object.assign(new Error('dup'), { code: 11000 }),
+      );
+      const res = await status('active').expect(409);
+      expect(res.body.message).toBe(ACTIVE_PUBLICATION_EXISTS);
+      save.mockRejectedValueOnce(new Error('boom'));
+      await status('active').expect(500);
+      save.mockRestore();
+      await status('active').expect(200);
+    });
+
+    it('filters by the pet current species after an edit', async () => {
+      const a = await register();
+      const pet = await createPet(a.token, { species: 'dog' });
+      const commune = `Species${uid()}`;
+      const pub = await publish(a.token, pet.id, commune);
+      await ctx
+        .http()
+        .patch(`/pets/${pet.id}`)
+        .set(auth(a.token))
+        .send({ species: 'cat' })
+        .expect(200);
+      const ids = async (species: string) =>
+        (
+          await ctx
+            .http()
+            .get('/publications')
+            .query({ commune, species })
+            .expect(200)
+        ).body.map((p: { id: string }) => p.id);
+      expect(await ids('cat')).toEqual([pub.id]);
+      expect(await ids('dog')).toEqual([]);
+    });
+
+    it('paginates publications and notifications', async () => {
+      const a = await register();
+      const c = await register();
+      const commune = `Paged${uid()}`;
+      const pubs: { id: string }[] = [];
+      for (const name of ['P1', 'P2', 'P3']) {
+        const pet = await createPet(a.token, { name });
+        pubs.push(await publish(a.token, pet.id, commune));
+      }
+      const page = async (q: object) =>
+        (
+          await ctx
+            .http()
+            .get('/publications')
+            .query({ commune, ...q })
+            .expect(200)
+        ).body.map((p: { id: string }) => p.id);
+      expect(await page({ limit: 2 })).toEqual([pubs[2].id, pubs[1].id]);
+      expect(await page({ limit: 2, page: 2 })).toEqual([pubs[0].id]);
+      await ctx.http().get('/publications').query({ limit: 101 }).expect(400);
+      await ctx.http().get('/publications').query({ page: 0 }).expect(400);
+
+      for (const p of pubs) {
+        await ctx
+          .http()
+          .post(`/publications/${p.id}/comments`)
+          .set(auth(c.token))
+          .send({ text: 'seen' })
+          .expect(201);
+      }
+      const notifs = async (q: object) =>
+        (
+          await ctx
+            .http()
+            .get('/notifications')
+            .query(q)
+            .set(auth(a.token))
+            .expect(200)
+        ).body;
+      expect(await notifs({})).toHaveLength(3);
+      const [first] = await notifs({ limit: 1 });
+      const [second] = await notifs({ limit: 1, page: 2 });
+      expect(first.id).not.toBe(second.id);
+      await ctx
+        .http()
+        .get('/notifications')
+        .query({ limit: 0 })
+        .set(auth(a.token))
+        .expect(400);
+    });
+
+    // Must stay last: it leaves the login route blocked for the TTL window.
+    it('rate-limits auth endpoints', async () => {
+      const previous = process.env.THROTTLE_STRICT_LIMIT;
+      process.env.THROTTLE_STRICT_LIMIT = '1';
+      try {
+        const login = () =>
+          ctx
+            .http()
+            .post('/auth/login')
+            .send({ email: 'nobody@example.com', password: 'whatever1' });
+        await login();
+        expect((await login()).status).toBe(429);
+      } finally {
+        process.env.THROTTLE_STRICT_LIMIT = previous;
+      }
     });
   });
 });

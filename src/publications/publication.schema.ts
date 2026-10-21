@@ -1,6 +1,6 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument, SchemaTypes, Types } from 'mongoose';
-import { PublicationStatus, Species } from '../common/enums';
+import { PublicationStatus } from '../common/enums';
 
 @Schema({ timestamps: true })
 export class Publication {
@@ -14,9 +14,6 @@ export class Publication {
 
   @Prop({ type: SchemaTypes.ObjectId, ref: 'Pet', required: true })
   pet: Types.ObjectId;
-
-  @Prop({ required: true, enum: Species, index: true })
-  species: Species;
 
   @Prop({ required: true, trim: true, index: true })
   commune: string;

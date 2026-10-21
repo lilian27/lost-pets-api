@@ -2,9 +2,13 @@ import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 import { MongooseModule } from '@nestjs/mongoose';
+import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
+import { APP_GUARD } from '@nestjs/core';
 import { AppController } from './app.controller';
 import { AuthModule } from './auth/auth.module';
 import { CommentsModule } from './comments/comments.module';
+import { resolveJwtSecret } from './common/jwt-secret';
+import { DEFAULT_THROTTLE } from './common/throttle';
 import { NotificationsModule } from './notifications/notifications.module';
 import { PetsModule } from './pets/pets.module';
 import { PublicationsModule } from './publications/publications.module';
@@ -26,10 +30,11 @@ import { UsersModule } from './users/users.module';
       global: true,
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({
-        secret: config.get<string>('JWT_SECRET', 'dev-secret-change-me'),
+        secret: resolveJwtSecret(config),
         signOptions: { expiresIn: '7d' },
       }),
     }),
+    ThrottlerModule.forRoot([DEFAULT_THROTTLE]),
     UsersModule,
     AuthModule,
     PetsModule,
@@ -38,5 +43,6 @@ import { UsersModule } from './users/users.module';
     NotificationsModule,
   ],
   controllers: [AppController],
+  providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })
 export class AppModule {}

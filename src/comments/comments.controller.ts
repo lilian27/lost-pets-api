@@ -15,13 +15,17 @@ import {
 import {
   ApiBadRequestResponse,
   ApiBearerAuth,
+  ApiConflictResponse,
   ApiCreatedResponse,
   ApiForbiddenResponse,
   ApiHeader,
   ApiNotFoundResponse,
   ApiResponse,
   ApiTags,
+  ApiTooManyRequestsResponse,
 } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
+import { STRICT_THROTTLE } from '../common/throttle';
 import { AuthUser, OptionalJwtAuthGuard } from '../common/auth.guard';
 import { CurrentUser } from '../common/current-user.decorator';
 import { ParseObjectIdPipe } from '../common/parse-object-id.pipe';
@@ -45,6 +49,12 @@ export class CommentsController {
       'Validation error (text > 300 chars, photo > 2MB, anonymous without authorName/authorEmail)',
   })
   @ApiNotFoundResponse({ description: 'Publication not found or not active' })
+  @ApiForbiddenResponse({
+    description: 'Anonymous users cannot post type possible_finding',
+  })
+  @ApiConflictResponse({ description: 'Publication is closed (found)' })
+  @ApiTooManyRequestsResponse({ description: 'Rate limit exceeded' })
+  @Throttle(STRICT_THROTTLE)
   create(
     @CurrentUser() user: AuthUser | null,
     @Param('id', ParseObjectIdPipe) id: string,
@@ -68,6 +78,9 @@ export class CommentsController {
     description: 'Edit token returned when an anonymous comment was created',
   })
   @ApiForbiddenResponse({ description: 'Caller is not the author' })
+  @ApiNotFoundResponse({
+    description: 'Comment not found or its publication is not visible',
+  })
   update(
     @CurrentUser() user: AuthUser | null,
     @Param('id', ParseObjectIdPipe) id: string,
@@ -79,7 +92,11 @@ export class CommentsController {
 
   @Post('comments/:id/flag')
   @HttpCode(200)
-  @ApiNotFoundResponse()
+  @ApiNotFoundResponse({
+    description: 'Comment not found or its publication is not visible',
+  })
+  @ApiTooManyRequestsResponse({ description: 'Rate limit exceeded' })
+  @Throttle(STRICT_THROTTLE)
   flag(
     @CurrentUser() user: AuthUser | null,
     @Param('id', ParseObjectIdPipe) id: string,

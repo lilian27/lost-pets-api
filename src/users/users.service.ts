@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
+import { isDuplicateKey } from '../common/mongo-errors';
 import { PrivateUserView, PublicUserView, UpdateUserDto } from './dto';
 import { User, UserDocument } from './user.schema';
 
@@ -14,7 +15,11 @@ export class UsersService {
 
   async create(data: User): Promise<UserDocument> {
     await this.assertUnique({ alias: data.alias, email: data.email });
-    return this.users.create(data);
+    try {
+      return await this.users.create(data);
+    } catch (err) {
+      throw UsersService.mapDuplicate(err);
+    }
   }
 
   findByEmailWithPassword(email: string) {
@@ -34,7 +39,11 @@ export class UsersService {
     if (dto.alias) await this.assertUnique({ alias: dto.alias }, id);
     const user = await this.findById(id);
     user.set(dto);
-    return user.save();
+    try {
+      return await user.save();
+    } catch (err) {
+      throw UsersService.mapDuplicate(err);
+    }
   }
 
   private async assertUnique(
@@ -54,6 +63,15 @@ export class UsersService {
           : 'Email is already registered',
       );
     }
+  }
+
+  private static mapDuplicate(err: unknown): unknown {
+    if (!isDuplicateKey(err)) return err;
+    return new ConflictException(
+      err.keyPattern?.alias
+        ? 'Alias is already taken'
+        : 'Email is already registered',
+    );
   }
 
   static toPrivate(user: UserDocument): PrivateUserView {

@@ -11,12 +11,14 @@ npm install
 npm run start:dev             # http://localhost:3000, Swagger UI at /docs
 ```
 
-| Variable      | Default                               | Notes                                  |
-| ------------- | ------------------------------------- | -------------------------------------- |
-| `PORT`        | `3000`                                |                                        |
-| `MONGODB_URI` | `mongodb://localhost:27017/lost-pets` |                                        |
-| `JWT_SECRET`  | `dev-secret-change-me`                | **Set this in any shared environment** |
-| `CORS_ORIGIN` | any origin                            | Comma-separated allow list             |
+| Variable                | Default                               | Notes                                                                   |
+| ----------------------- | ------------------------------------- | ----------------------------------------------------------------------- |
+| `PORT`                  | `3000`                                |                                                                         |
+| `MONGODB_URI`           | `mongodb://localhost:27017/lost-pets` |                                                                         |
+| `JWT_SECRET`            | `dev-secret-change-me` (dev only)     | **Required** when `NODE_ENV=production` (startup fails otherwise)       |
+| `CORS_ORIGIN`           | any origin                            | Comma-separated allow list                                              |
+| `THROTTLE_LIMIT`        | `300`                                 | Requests per minute per IP, all routes                                  |
+| `THROTTLE_STRICT_LIMIT` | `30`                                  | Requests per minute per IP for `/auth/*`, comment creation and flagging |
 
 ## Tests
 
@@ -34,30 +36,30 @@ The full contract is in Swagger (`/docs`, JSON at `/docs-json`). Summary:
 
 Auth: `Authorization: Bearer <accessToken>`.
 
-| Method | Path                           | Auth     | Notes                                                                 |
-| ------ | ------------------------------ | -------- | --------------------------------------------------------------------- |
-| POST   | `/auth/register`               | –        | `{alias, name, email, phone, commune, password}` → `{accessToken, user}` |
-| POST   | `/auth/login`                  | –        | `{email, password}` → `{accessToken, user}`                           |
-| GET    | `/users/me`                    | required | Private profile                                                       |
-| PATCH  | `/users/me`                    | required | `{alias?, name?, phone?, commune?}`                                   |
-| POST   | `/pets`                        | required | `{name, species, sex, size, color?, vaccines?, description?, photo}`  |
-| GET    | `/pets`                        | required | Caller's pets                                                         |
-| GET    | `/pets/:id`                    | required | Owner only (403 otherwise)                                            |
-| PATCH  | `/pets/:id`                    | required | Owner only                                                            |
-| POST   | `/publications`                | required | `{petId, commune, description?, lastSeenAddress?}`; `lostAt` is set by the server. 409 if the pet already has an active publication |
-| GET    | `/publications?commune&species`| –        | Active publications only                                              |
-| GET    | `/publications/mine`           | required | Caller's history, all statuses                                        |
-| GET    | `/publications/:id`            | optional | Non-active publications are only visible to their owner (404 otherwise) |
-| PATCH  | `/publications/:id/status`     | required | `{status: active\|found}`; owner only (403 otherwise)                 |
-| POST   | `/publications/:id/comments`   | optional | `{text, type?, photo?, authorName?, authorEmail?}`. Anonymous callers must send `authorName` + `authorEmail` and get back a one-time `editToken` |
-| GET    | `/publications/:id/comments`   | optional | Thread, oldest first                                                  |
-| PATCH  | `/comments/:id`                | optional | `{text}`; the registered author, or anonymous author with `X-Edit-Token` |
-| POST   | `/comments/:id/flag`           | optional | Flag as offensive (idempotent per registered user)                    |
-| DELETE | `/comments/:id`                | –        | Always `405`: comments cannot be deleted                              |
-| GET    | `/notifications`               | required | Caller's notifications, newest first                                  |
-| GET    | `/notifications/unread-count`  | required | `{count}`                                                             |
-| PATCH  | `/notifications/:id/read`      | required |                                                                       |
-| PATCH  | `/notifications/read-all`      | required | `{updated}`                                                           |
+| Method | Path                            | Auth     | Notes                                                                                                                                            |
+| ------ | ------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| POST   | `/auth/register`                | –        | `{alias, name, email, phone, commune, password}` → `{accessToken, user}`                                                                         |
+| POST   | `/auth/login`                   | –        | `{email, password}` → `{accessToken, user}`                                                                                                      |
+| GET    | `/users/me`                     | required | Private profile                                                                                                                                  |
+| PATCH  | `/users/me`                     | required | `{alias?, name?, phone?, commune?}`                                                                                                              |
+| POST   | `/pets`                         | required | `{name, species, sex, size, color?, vaccines?, description?, photo}`                                                                             |
+| GET    | `/pets`                         | required | Caller's pets                                                                                                                                    |
+| GET    | `/pets/:id`                     | required | Owner only (403 otherwise)                                                                                                                       |
+| PATCH  | `/pets/:id`                     | required | Owner only                                                                                                                                       |
+| POST   | `/publications`                 | required | `{petId, commune, description?, lastSeenAddress?}`; `lostAt` is set by the server. 409 if the pet already has an active publication              |
+| GET    | `/publications?commune&species` | –        | Active publications only                                                                                                                         |
+| GET    | `/publications/mine`            | required | Caller's history, all statuses                                                                                                                   |
+| GET    | `/publications/:id`             | optional | Non-active publications are only visible to their owner (404 otherwise)                                                                          |
+| PATCH  | `/publications/:id/status`      | required | `{status: active\|found}`; owner only (403 otherwise)                                                                                            |
+| POST   | `/publications/:id/comments`    | optional | `{text, type?, photo?, authorName?, authorEmail?}`. Anonymous callers must send `authorName` + `authorEmail` and get back a one-time `editToken` |
+| GET    | `/publications/:id/comments`    | optional | Thread, oldest first                                                                                                                             |
+| PATCH  | `/comments/:id`                 | optional | `{text}`; the registered author, or anonymous author with `X-Edit-Token`                                                                         |
+| POST   | `/comments/:id/flag`            | optional | Flag as offensive (idempotent per registered user)                                                                                               |
+| DELETE | `/comments/:id`                 | –        | Always `405`: comments cannot be deleted                                                                                                         |
+| GET    | `/notifications`                | required | Caller's notifications, newest first                                                                                                             |
+| GET    | `/notifications/unread-count`   | required | `{count}`                                                                                                                                        |
+| PATCH  | `/notifications/:id/read`       | required |                                                                                                                                                  |
+| PATCH  | `/notifications/read-all`       | required | `{updated}`                                                                                                                                      |
 
 Enums: `species: dog|cat`, `sex: male|female`, `size: small|medium|large`,
 `status: active|found`, `comment type: comment|sighting|possible_finding`.

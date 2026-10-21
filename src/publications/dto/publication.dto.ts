@@ -8,6 +8,7 @@ import {
   MaxLength,
 } from 'class-validator';
 import { PublicationStatus, Species } from '../../common/enums';
+import { PaginationQuery } from '../../common/pagination.dto';
 
 export class CreatePublicationDto {
   @ApiProperty({ description: 'Id of a pet owned by the caller' })
@@ -33,7 +34,7 @@ export class CreatePublicationDto {
   lastSeenAddress?: string;
 }
 
-export class ListPublicationsQuery {
+export class ListPublicationsQuery extends PaginationQuery {
   @ApiPropertyOptional({ example: 'Providencia' })
   @IsOptional()
   @IsString()

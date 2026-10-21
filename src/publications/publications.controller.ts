@@ -52,7 +52,7 @@ export class PublicationsController {
   @Get()
   @ApiOkResponse({
     description:
-      'Public list of active publications. Owner is exposed only as { id, alias }.',
+      'Public list of active publications, newest first, paginated with page/limit (default 24). Owner is exposed only as { id, alias }.',
   })
   async list(@Query() query: ListPublicationsQuery) {
     const pubs = await this.publications.findActive(query);

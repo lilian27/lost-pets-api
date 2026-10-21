@@ -1,20 +1,27 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { createHash, randomBytes } from 'crypto';
 import { Model } from 'mongoose';
 import { AuthUser } from '../common/auth.guard';
-import { CommentType } from '../common/enums';
+import { CommentType, PublicationStatus } from '../common/enums';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PublicationsService } from '../publications/publications.service';
 import { UserDocument } from '../users/user.schema';
 import { UsersService } from '../users/users.service';
 import { Comment, CommentDocument } from './comment.schema';
 import { CreateCommentDto, UpdateCommentDto } from './dto/comment.dto';
+
+export const PUBLICATION_CLOSED =
+  'This publication is closed and no longer accepts comments';
+export const POSSIBLE_FINDING_REQUIRES_ACCOUNT =
+  'Only registered users can report a possible finding';
 
 const hashToken = (token: string) =>
   createHash('sha256').update(token).digest('hex');
@@ -25,6 +32,8 @@ type CommentWithAuthor = Omit<CommentDocument, 'author'> & {
 
 @Injectable()
 export class CommentsService {
+  private readonly logger = new Logger(CommentsService.name);
+
   constructor(
     @InjectModel(Comment.name) private readonly comments: Model<Comment>,
     private readonly publications: PublicationsService,
@@ -37,10 +46,17 @@ export class CommentsService {
     user: AuthUser | null,
   ) {
     const pub = await this.publications.findVisible(publicationId, user);
+    if (pub.status !== PublicationStatus.ACTIVE) {
+      throw new ConflictException(PUBLICATION_CLOSED);
+    }
+    const type = dto.type ?? CommentType.COMMENT;
+    if (!user && type === CommentType.POSSIBLE_FINDING) {
+      throw new ForbiddenException(POSSIBLE_FINDING_REQUIRES_ACCOUNT);
+    }
     let editToken: string | undefined;
     const base = {
       publication: pub.id,
-      type: dto.type ?? CommentType.COMMENT,
+      type,
       text: dto.text,
       photo: dto.photo,
     };
@@ -62,18 +78,25 @@ export class CommentsService {
       });
     }
 
+    const populated = await this.withAuthor(created);
     if (!user || pub.owner.id !== user.sub) {
-      await this.notifications.create({
-        recipientId: pub.owner.id,
-        publicationId: pub.id,
-        commentId: created.id,
-        type: created.type,
-        actorName: user ? user.alias : (dto.authorName as string),
-        petName: pub.pet.name,
-      });
+      try {
+        await this.notifications.create({
+          recipientId: pub.owner.id,
+          publicationId: pub.id,
+          commentId: created.id,
+          type: created.type,
+          actorName: populated.author?.alias ?? (dto.authorName as string),
+          petName: pub.pet.name,
+        });
+      } catch (err) {
+        this.logger.error(
+          `Could not notify owner about comment ${created.id}`,
+          (err as Error).stack,
+        );
+      }
     }
 
-    const populated = await this.withAuthor(created);
     return {
       ...CommentsService.toView(populated, user),
       ...(editToken ? { editToken } : {}),
@@ -103,6 +126,7 @@ export class CommentsService {
       .select('+editTokenHash')
       .exec();
     if (!comment) throw new NotFoundException('Comment not found');
+    await this.publications.findVisible(comment.publication.toString(), user);
     const isAuthor = !!user && !!comment.author?.equals(user.sub);
     const hasToken =
       !comment.author &&
@@ -120,14 +144,22 @@ export class CommentsService {
   async flag(id: string, user: AuthUser | null) {
     const comment = await this.comments.findById(id).exec();
     if (!comment) throw new NotFoundException('Comment not found');
-    const alreadyFlagged =
-      !!user && comment.flaggedBy.some((u) => u.equals(user.sub));
-    if (!alreadyFlagged) {
-      if (user) comment.flaggedBy.push(user.sub as never);
-      comment.flagCount += 1;
-      await comment.save();
-    }
-    return CommentsService.toView(await this.withAuthor(comment), user);
+    await this.publications.findVisible(comment.publication.toString(), user);
+    // Atomic so concurrent flags are neither lost nor double-counted.
+    const updated = await this.comments
+      .findOneAndUpdate(
+        user ? { _id: id, flaggedBy: { $ne: user.sub } } : { _id: id },
+        {
+          $inc: { flagCount: 1 },
+          ...(user ? { $addToSet: { flaggedBy: user.sub } } : {}),
+        },
+        { new: true },
+      )
+      .exec();
+    return CommentsService.toView(
+      await this.withAuthor(updated ?? comment),
+      user,
+    );
   }
 
   private async withAuthor(c: CommentDocument) {

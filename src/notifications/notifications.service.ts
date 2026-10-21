@@ -2,6 +2,7 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
 import { CommentType } from '../common/enums';
+import { PaginationQuery, toPaging } from '../common/pagination.dto';
 import { Notification, NotificationDocument } from './notification.schema';
 
 const TYPE_LABEL: Record<CommentType, string> = {
@@ -9,6 +10,8 @@ const TYPE_LABEL: Record<CommentType, string> = {
   [CommentType.SIGHTING]: 'sighting',
   [CommentType.POSSIBLE_FINDING]: 'possible finding',
 };
+
+export const DEFAULT_NOTIFICATIONS_PAGE_SIZE = 50;
 
 export interface NewNotification {
   recipientId: string;
@@ -36,11 +39,16 @@ export class NotificationsService {
     });
   }
 
-  listMine(userId: string): Promise<NotificationDocument[]> {
+  listMine(
+    userId: string,
+    query: PaginationQuery,
+  ): Promise<NotificationDocument[]> {
+    const { skip, limit } = toPaging(query, DEFAULT_NOTIFICATIONS_PAGE_SIZE);
     return this.notifications
       .find({ recipient: userId })
       .sort({ createdAt: -1, _id: -1 })
-      .limit(100)
+      .skip(skip)
+      .limit(limit)
       .exec();
   }
 

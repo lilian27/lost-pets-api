@@ -6,11 +6,16 @@ import {
   ApiOkResponse,
   ApiTags,
   ApiUnauthorizedResponse,
+  ApiTooManyRequestsResponse,
 } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
+import { STRICT_THROTTLE } from '../common/throttle';
 import { AuthService } from './auth.service';
 import { LoginDto, RegisterDto } from './dto/auth.dto';
 
 @ApiTags('auth')
+@ApiTooManyRequestsResponse({ description: 'Rate limit exceeded' })
+@Throttle(STRICT_THROTTLE)
 @Controller('auth')
 export class AuthController {
   constructor(private readonly auth: AuthService) {}
